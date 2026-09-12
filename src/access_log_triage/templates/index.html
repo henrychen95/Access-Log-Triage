@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Access Log Triage</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', path='/favicon.svg') }}">
+  <link rel="stylesheet" href="{{ url_for('static', path='/app.css') }}">
+  <script src="{{ url_for('static', path='/app.js') }}" defer></script>
+</head>
+<body class="hide-queries">
+  <header class="site-header">
+    <div>
+      <h1><a href="/">Access Log Triage</a></h1>
+      <p>Reconstruct one client's web request journey from an Apache access log.</p>
+    </div>
+    <span class="local-badge">Local only</span>
+  </header>
+
+  <main>
+    {% if not loaded_log or replace_mode %}
+    <section class="panel upload-panel" aria-labelledby="upload-heading">
+      <h2 id="upload-heading">{{ 'Replace log' if loaded_log else 'Load an Apache access log' }}</h2>
+      {% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
+      {% if loaded_log %}
+      <div class="replacement-note">
+        <strong>Currently loaded: {{ loaded_log.filename }}</strong>
+        <span>{{ "{:,}".format(loaded_log.total_lines) }} lines · {{ loaded_log.parse_error_count }} parser {{ 'error' if loaded_log.parse_error_count == 1 else 'errors' }}</span>
+        <span>The current log remains available unless the replacement parses successfully.</span>
+      </div>
+      {% endif %}
+      <form action="/upload" method="post" enctype="multipart/form-data">
+        <label class="field-label" for="log-file">Apache Access Log</label>
+        <label class="drop-zone" id="drop-zone" for="log-file">
+          <strong>Drop a log file here</strong>
+          <span>or click to choose a file (maximum 150 MiB)</span>
+          <span class="selected-file" id="selected-file">No file selected</span>
+        </label>
+        <input class="visually-hidden" id="log-file" name="log_file" type="file" required>
+        <div class="upload-actions">
+          <button class="primary" type="submit">{{ 'Replace log' if loaded_log else 'Load log' }}</button>
+          {% if loaded_log %}<a class="secondary" href="/">Cancel</a>{% endif %}
+        </div>
+      </form>
+      <p class="privacy-note">The original upload is closed after parsing. Parsed records remain only in process memory.</p>
+    </section>
+    {% else %}
+    <section class="panel loaded-log-panel" aria-label="Loaded log">
+      <div>
+        <p class="eyebrow">Loaded log</p>
+        <h2>{{ loaded_log.filename }}</h2>
+        <p>{{ "{:,}".format(loaded_log.total_lines) }} lines · {{ loaded_log.parse_error_count }} parser {{ 'error' if loaded_log.parse_error_count == 1 else 'errors' }}</p>
+      </div>
+      <a class="secondary" href="/replace">Replace log</a>
+    </section>
+
+    <section class="panel analyze-panel" aria-labelledby="analyze-heading">
+      <h2 id="analyze-heading">Analyze IP</h2>
+      {% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
+      <form action="/analyze" method="post">
+        <input name="log_id" type="hidden" value="{{ loaded_log.id }}">
+        <div class="form-row">
+          <div class="field grow">
+            <label class="field-label" for="ip-address">IP Address</label>
+            <input id="ip-address" name="ip_address" type="text" inputmode="text"
+                   placeholder="IPv4 or IPv6 address" value="{{ entered_ip }}" required autofocus>
+          </div>
+          <div class="field gap-field">
+            <label class="field-label" for="session-gap">Session gap</label>
+            <div class="number-unit">
+              <input id="session-gap" name="session_gap" type="number" min="1" max="1440"
+                     value="{{ entered_gap }}" required>
+              <span>minutes</span>
+            </div>
+          </div>
+          <button class="primary" type="submit">Analyze</button>
+        </div>
+      </form>
+    </section>
+    {% endif %}
+
+    {% if analysis_performed %}
+    <section class="results-heading">
+      <div>
+        <p class="eyebrow">Exact IP match</p>
+        <h2>{{ analyzed_ip }}</h2>
+      </div>
+    </section>
+
+    {% if records %}
+    <section class="metric-grid" aria-label="Analysis summary">
+      <div class="metric"><strong>{{ sessions|length }}</strong><span>Sessions</span></div>
+      <div class="metric"><strong>{{ metrics.total }}</strong><span>Total requests</span></div>
+      <div class="metric"><strong>{{ metrics.application }}</strong><span>Application</span></div>
+      <div class="metric"><strong>{{ metrics.static }}</strong><span>Static</span></div>
+      <div class="metric"><strong>{{ metrics.post }}</strong><span>POST</span></div>
+      <div class="metric status-4xx"><strong>{{ metrics['4xx'] }}</strong><span>4xx</span></div>
+      <div class="metric status-5xx"><strong>{{ metrics['5xx'] }}</strong><span>5xx</span></div>
+    </section>
+
+    <section class="panel controls" aria-label="Timeline filters">
+      <div class="toggle-row">
+        <label><input id="show-static" type="checkbox"> Show static resources</label>
+        <label><input id="hide-queries" type="checkbox" checked> Hide query strings</label>
+      </div>
+      <div class="filter-row">
+        <div class="button-group" role="group" aria-label="Request filter">
+          {% for filter in ['all', 'GET', 'POST', '3xx', '4xx', '5xx'] %}
+          <button type="button" class="filter-button{% if filter == 'all' %} active{% endif %}" data-filter="{{ filter }}">{{ filter|upper }}</button>
+          {% endfor %}
+        </div>
+        <label class="path-filter">Filter path
+          <input id="path-filter" type="search" placeholder="Path contains…">
+        </label>
+      </div>
+    </section>
+
+    {% if sessions|length > 1 %}
+    <details class="panel compare-wide" id="journey-compare">
+      <summary>Compare sessions</summary>
+      <div class="compare-body">
+        <div class="compare-toolbar">
+          <label>Left session
+            <select id="compare-left">
+              {% for journey in journeys %}<option value="{{ journey.number }}">Session #{{ journey.number }}</option>{% endfor %}
+            </select>
+          </label>
+          <label>Right session
+            <select id="compare-right">
+              {% for journey in journeys %}<option value="{{ journey.number }}"{% if loop.index == 2 %} selected{% endif %}>Session #{{ journey.number }}</option>{% endfor %}
+            </select>
+          </label>
+          <label class="compare-checkbox"><input id="hide-common-prefix" type="checkbox"> Hide common prefix</label>
+          <span class="application-only">Application requests only</span>
+        </div>
+        <div id="journey-data" hidden>
+          {% for journey in journeys %}<div data-session="{{ journey.number }}" data-requests="{{ journey.requests|tojson|forceescape }}"></div>{% endfor %}
+        </div>
+        <p class="common-hidden-note" id="common-hidden-note" hidden></p>
+        <div class="compare-headings">
+          <strong id="left-session-heading">Session #1</strong>
+          <strong id="right-session-heading">Session #2</strong>
+        </div>
+        <div class="compare-rows" id="compare-rows"></div>
+      </div>
+    </details>
+    {% endif %}
+
+    <div class="content-grid">
+      <div class="sessions">
+        {% for session in sessions %}
+        <section class="panel session" data-session="{{ session.number }}">
+          <header class="session-header">
+            <div>
+              <p class="eyebrow">Session #{{ session.number }}</p>
+              <h3>{{ session.start.strftime('%H:%M:%S') }} – {{ session.end.strftime('%H:%M:%S') }}</h3>
+              <p>{{ session.start.strftime('%d %b %Y') }} · Duration {{ format_duration(session.duration) }}</p>
+            </div>
+            <div class="session-total"><strong>{{ session.total_requests }}</strong> requests</div>
+          </header>
+          <dl class="session-summary">
+            <div><dt>Application</dt><dd>{{ session.application_requests }}</dd></div>
+            <div><dt>Static</dt><dd>{{ session.static_requests }}</dd></div>
+            <div><dt>GET</dt><dd>{{ session.method_count('GET') }}</dd></div>
+            <div><dt>POST</dt><dd>{{ session.method_count('POST') }}</dd></div>
+            <div><dt>3xx</dt><dd>{{ session.group_count('3xx') }}</dd></div>
+            <div><dt>4xx</dt><dd>{{ session.group_count('4xx') }}</dd></div>
+            <div><dt>5xx</dt><dd>{{ session.group_count('5xx') }}</dd></div>
+            <div><dt>Unique paths</dt><dd>{{ session.unique_paths }}</dd></div>
+          </dl>
+          <p class="ua-summary">{{ session.user_agent_summary }}</p>
+
+          <div class="timeline">
+            {% for entry in session.entries %}
+            {% set group = status_group(entry.status) %}
+            <details class="request-row{% if is_static_resource(entry) %} static-request{% endif %}{% if is_static_noise(entry) %} static-noise{% endif %}"
+                     data-method="{{ entry.method }}" data-status="{{ entry.status }}" data-status-group="{{ group }}" data-path="{{ entry.path|lower }}">
+              <summary>
+                <time datetime="{{ entry.timestamp.isoformat() }}">{{ entry.timestamp.strftime('%H:%M:%S') }}</time>
+                <span class="method method-{{ entry.method|lower }}">{{ entry.method }}</span>
+                <span class="request-path">{{ entry.path }}</span>
+                <span class="status status-{{ group }}">{{ entry.status }}</span>
+                {% if is_static_resource(entry) %}<span class="static-label">static</span>{% endif %}
+              </summary>
+              <div class="request-detail">
+                <dl>
+                  <div><dt>Timestamp</dt><dd>{{ entry.timestamp.isoformat() }}</dd></div>
+                  <div><dt>Method</dt><dd>{{ entry.method }}</dd></div>
+                  <div><dt>Path</dt><dd>{{ entry.path }}</dd></div>
+                  <div class="query-detail"><dt>Query <span class="sensitive">may contain sensitive data</span></dt><dd>{{ entry.query_string or '—' }}</dd></div>
+                  <div><dt>Status</dt><dd>{{ entry.status }}</dd></div>
+                  <div><dt>Response bytes</dt><dd>{{ entry.response_bytes if entry.response_bytes is not none else '—' }}</dd></div>
+                  <div><dt>Protocol</dt><dd>{{ entry.protocol }}</dd></div>
+                  <div><dt>Referer</dt><dd class="wrap">{{ entry.referer or '—' }}</dd></div>
+                  <div><dt>User-Agent</dt><dd class="wrap">{{ entry.user_agent or '—' }}</dd></div>
+                  <div><dt>Log line number</dt><dd>{{ entry.line_number }}</dd></div>
+                </dl>
+                <div class="raw-block"><strong>Raw log line</strong><pre class="raw-redacted">{{ redacted_raw_line(entry) }}</pre><pre class="raw-full">{{ entry.raw_line }}</pre></div>
+              </div>
+            </details>
+            {% endfor %}
+            <p class="empty-filter-message" hidden>No requests match the current filters.</p>
+          </div>
+        </section>
+        {% endfor %}
+      </div>
+
+      <aside>
+        <section class="panel top-paths">
+          <h3>Top Paths</h3>
+          {% if paths %}
+          <table><thead><tr><th>Path</th><th>Count</th></tr></thead>
+            <tbody>{% for path, count in paths %}<tr><td>{{ path }}</td><td>{{ count }}</td></tr>{% endfor %}</tbody>
+          </table>
+          {% else %}<p>No application paths.</p>{% endif %}
+        </section>
+
+      </aside>
+    </div>
+    {% else %}
+    <section class="panel empty-result"><h3>No requests found</h3><p>No requests found for {{ analyzed_ip }} in the currently loaded log.</p></section>
+    {% endif %}
+    {% endif %}
+  </main>
+
+  <footer>Access Log Triage · No telemetry · No external services</footer>
+</body>
+</html>
